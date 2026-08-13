@@ -2,93 +2,99 @@
 
 App para gerenciar agentes de IA que respondem no WhatsApp através da **API oficial da Meta (WhatsApp Cloud API)**.
 
-Cada **agente** representa um número do WhatsApp Business: tem seu próprio nome, persona/system prompt, provedor de IA (Anthropic, OpenAI ou nenhum) e suas próprias credenciais da Meta. O backend recebe os webhooks da Meta, guarda o histórico de conversas e permite enviar mensagens de volta pela Cloud API.
+Cada **agente** representa um número do WhatsApp Business: tem seu próprio nome, persona/system prompt, provedor de IA (Anthropic, OpenAI ou nenhum) e suas próprias credenciais da Meta. O app recebe os webhooks da Meta, guarda o histórico de conversas e permite enviar mensagens de volta pela Cloud API.
 
 ## Arquitetura
 
-Monorepo com dois projetos independentes:
+**Um único projeto Next.js (App Router)** — frontend e backend no mesmo deploy, sem runtime separado. Pensado para rodar 100% na Vercel:
+
+- **UI**: páginas em `app/` (dashboard de agentes).
+- **API**: Route Handlers em `app/api/**/route.ts` fazem o papel do backend (CRUD de agentes, webhook da Meta, envio de mensagens).
+- **Banco de dados**: PostgreSQL via [Prisma](https://www.prisma.io/). Recomendado [Neon](https://neon.tech) (serverless, com pooler compatível com funções serverless da Vercel).
+- **Segredos** (access token e app secret da Meta, chaves de IA) são armazenados **criptografados em repouso** (AES-256-GCM) e nunca retornados em texto puro pela API — apenas mascarados.
+- Cada agente tem sua própria URL de webhook: `POST/GET /api/webhook/{agent_id}`, o que permite conectar números/Apps diferentes da Meta a agentes diferentes.
 
 ```
-backend/    FastAPI (Python) — API REST + integração com a WhatsApp Cloud API
-frontend/   Next.js (TypeScript) — dashboard para gerenciar agentes
+app/
+  page.tsx                 dashboard: lista de agentes
+  agents/new/page.tsx       criar agente
+  agents/[id]/page.tsx      editar agente, credenciais, testar envio, conversas
+  api/
+    agents/route.ts                        GET (listar) / POST (criar)
+    agents/[id]/route.ts                   GET / PATCH / DELETE
+    agents/[id]/credentials/route.ts       GET / PUT / DELETE
+    agents/[id]/messages/send/route.ts     POST (enviar mensagem)
+    agents/[id]/conversations/route.ts     GET (listar conversas)
+    conversations/[id]/route.ts            GET (conversa + mensagens)
+    webhook/[agentId]/route.ts             GET (verificação) / POST (recebimento)
+lib/       prisma client, criptografia, cliente da WhatsApp Cloud API, validação (zod)
+prisma/    schema.prisma + migrations
 ```
 
-- **Banco de dados:** PostgreSQL (recomendado um serviço gerenciado como Neon ou Supabase em produção).
-- **Segredos** (access token e app secret da Meta, chaves de IA) são armazenados **criptografados em repouso** (Fernet) e nunca retornados em texto puro pela API — apenas mascarados.
-- Cada agente tem sua própria URL de webhook: `POST/GET /webhook/{agent_id}`, o que permite conectar números/Apps diferentes da Meta a agentes diferentes.
-
-## Backend (FastAPI)
-
-### Setup
+## Setup local
 
 ```bash
-cd backend
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env
-# edite .env: DATABASE_URL e gere uma ENCRYPTION_KEY:
-.venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+npm install               # também roda `prisma generate` (postinstall)
+cp .env.example .env.local
+# gere uma ENCRYPTION_KEY:
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-Suba um Postgres local (ou aponte `DATABASE_URL` para um Postgres gerenciado):
+Suba um Postgres local:
 
 ```bash
 docker compose up -d db
 ```
 
-Rode as migrations e inicie a API:
+Rode as migrations e inicie o app:
 
 ```bash
-.venv/bin/alembic upgrade head
-.venv/bin/uvicorn app.main:app --reload --port 8000
+npm run db:migrate   # aplica as migrations no Postgres local
+npm run dev
 ```
 
-A API sobe em `http://localhost:8000` (docs interativas em `/docs`).
+App em `http://localhost:3000`.
 
 ### Testes
 
 ```bash
-.venv/bin/pytest
+npm test
 ```
 
-### Principais endpoints
+Os testes chamam os Route Handlers diretamente (sem subir um servidor) contra um Postgres local de teste. Crie o banco antes de rodar:
 
-| Método | Rota | Descrição |
-|---|---|---|
-| `GET/POST` | `/agents` | Listar / criar agentes |
-| `GET/PATCH/DELETE` | `/agents/{id}` | Detalhar / atualizar / remover um agente |
-| `GET/PUT/DELETE` | `/agents/{id}/credentials` | Ver / cadastrar / remover credenciais da Meta do agente |
-| `GET` | `/webhook/{agent_id}` | Verificação do webhook (handshake da Meta) |
-| `POST` | `/webhook/{agent_id}` | Recebimento de mensagens/status do WhatsApp |
-| `POST` | `/agents/{id}/messages/send` | Enviar mensagem de texto via WhatsApp |
-| `GET` | `/agents/{id}/conversations` | Listar conversas do agente |
-| `GET` | `/conversations/{id}` | Detalhe de uma conversa com mensagens |
+```bash
+createdb -U joobot joobot_test   # ou: psql -c "CREATE DATABASE joobot_test OWNER joobot;"
+DATABASE_URL=postgresql://joobot:joobot@localhost:5432/joobot_test DIRECT_URL=$DATABASE_URL npx prisma migrate deploy
+npm test
+```
+
+## Deploy na Vercel
+
+1. Crie um banco no [Neon](https://neon.tech) (ou use a integração Neon do próprio [Vercel Marketplace](https://vercel.com/marketplace)).
+2. No projeto da Vercel, configure as variáveis de ambiente:
+   - `DATABASE_URL` — connection string **pooled** do Neon, com `?pgbouncer=true&connect_timeout=15` no final.
+   - `DIRECT_URL` — connection string **unpooled** do Neon (usada só para migrations).
+   - `ENCRYPTION_KEY` — chave gerada como acima.
+3. Rode as migrations contra o banco de produção (uma vez, localmente ou via CI, usando `DIRECT_URL`):
+   ```bash
+   DATABASE_URL=$DIRECT_URL DIRECT_URL=$DIRECT_URL npx prisma migrate deploy
+   ```
+4. Importe o repositório na Vercel — é um projeto Next.js padrão, zero configuração adicional (`next build` já é o build command default; `prisma generate` roda automaticamente no `postinstall`).
+
+Depois do deploy, a URL de webhook de cada agente vai ser `https://SEU_DOMINIO.vercel.app/api/webhook/{agent_id}` — o dashboard mostra essa URL pronta na página de cada agente.
 
 ### Configurando o webhook no painel da Meta
 
 1. Crie um agente e cadastre suas credenciais (`phone_number_id`, `access_token`, `verify_token`, e opcionalmente `app_secret` para validar a assinatura das requisições).
 2. No [Meta for Developers](https://developers.facebook.com/), no seu App → WhatsApp → Configuration, configure:
-   - **Callback URL:** `https://SEU_DOMINIO/webhook/{agent_id}` (em desenvolvimento local, use `ngrok` ou similar para expor `localhost:8000`).
+   - **Callback URL:** a URL de webhook mostrada no dashboard do agente.
    - **Verify token:** o mesmo valor cadastrado no agente.
 3. Assine o campo `messages`.
-
-## Frontend (Next.js)
-
-### Setup
-
-```bash
-cd frontend
-npm install
-cp .env.example .env.local
-# edite NEXT_PUBLIC_API_URL se o backend não estiver em localhost:8000
-npm run dev
-```
-
-Dashboard em `http://localhost:3000`: criar/editar agentes, cadastrar credenciais da Meta, ver a URL de webhook a configurar, testar envio de mensagens e visualizar conversas.
 
 ## Roadmap (próximos passos sugeridos)
 
 - Gerar respostas automáticas via IA (Anthropic/OpenAI) a partir das mensagens recebidas — hoje elas só são armazenadas.
 - Autenticação/login no dashboard (hoje a API não tem controle de acesso).
 - Suporte a mensagens de mídia (imagem, áudio, documentos) além de texto.
-- Fila/worker assíncrono para processar webhooks e gerar respostas sem bloquear a requisição da Meta.
+- Fila/worker para processar webhooks e gerar respostas de forma assíncrona.

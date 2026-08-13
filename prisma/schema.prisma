@@ -1,0 +1,100 @@
+// Prisma schema for jo-obot.
+// DATABASE_URL should point at a pooled connection (e.g. Neon's pooled
+// connection string) for runtime queries; DIRECT_URL should be the
+// unpooled connection, used only for running migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum AIProvider {
+  none
+  anthropic
+  openai
+}
+
+enum MessageDirection {
+  inbound
+  outbound
+}
+
+enum MessageStatus {
+  received
+  sent
+  delivered
+  read
+  failed
+}
+
+model Agent {
+  id                String     @id @default(cuid())
+  name              String
+  description       String?
+  systemPrompt      String     @default("You are a helpful assistant answering WhatsApp messages.") @map("system_prompt")
+  aiProvider        AIProvider @default(none) @map("ai_provider")
+  aiModel           String?    @map("ai_model")
+  aiApiKeyEncrypted String?    @map("ai_api_key_encrypted")
+  isActive          Boolean    @default(true) @map("is_active")
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+
+  credential    WhatsAppCredential?
+  conversations Conversation[]
+
+  @@map("agents")
+}
+
+model WhatsAppCredential {
+  id                   String   @id @default(cuid())
+  agentId              String   @unique @map("agent_id")
+  phoneNumberId        String   @map("phone_number_id")
+  wabaId               String?  @map("waba_id")
+  displayPhoneNumber   String?  @map("display_phone_number")
+  accessTokenEncrypted String   @map("access_token_encrypted")
+  appSecretEncrypted   String?  @map("app_secret_encrypted")
+  verifyToken          String   @map("verify_token")
+  apiVersion           String   @default("v21.0") @map("api_version")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@map("whatsapp_credentials")
+}
+
+model Conversation {
+  id            String    @id @default(cuid())
+  agentId       String    @map("agent_id")
+  contactWaId   String    @map("contact_wa_id")
+  contactName   String?   @map("contact_name")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastMessageAt DateTime? @map("last_message_at")
+
+  agent    Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@unique([agentId, contactWaId], name: "agentId_contactWaId")
+  @@map("conversations")
+}
+
+model Message {
+  id             String           @id @default(cuid())
+  conversationId String           @map("conversation_id")
+  direction      MessageDirection
+  waMessageId    String?          @unique @map("wa_message_id")
+  messageType    String           @default("text") @map("message_type")
+  content        String
+  status         MessageStatus    @default(received)
+  rawPayload     Json?            @map("raw_payload")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@map("messages")
+}
